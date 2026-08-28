@@ -1,8 +1,8 @@
 # Packaging skeleton for the `mog` CLI (package: mogestrator).
 #
-# NOTE: declares the intended build/metadata contract from ADR-0005 and
-# docs/DISTRIBUTION.md. The `mog.cli.main` entry point lands in M1 — this file
-# is not installable until then.
+# 0.0.1 is a name-reservation release: it installs, prints a notice, and does
+# nothing else. The metadata below is the intended contract from ADR-0005 and
+# docs/DISTRIBUTION.md; the real CLI lands in M1.
 
 [build-system]
 requires = ["hatchling>=1.25"]
@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mogestrator"                # verify availability on PyPI before first publish
-version = "0.0.0"
+version = "0.0.1"
 description = "A context substrate and policy gateway for coding agents: an anchored, self-invalidating code knowledge graph with eviction-and-recall memory, served over MCP."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,19 +28,17 @@ classifiers = [
   "Topic :: Text Processing :: Indexing",
 ]
 
-# Base install must work offline with local embeddings (ADR-0005).
-dependencies = [
-  "pydantic>=2.7",
-  "pyyaml>=6.0",
-  "typer>=0.12",
-  "rich>=13.7",
-  "sqlite-vec>=0.1.6",           # Q2: confirm recall at 1e6 vectors
-  "tree-sitter>=0.23",
-  "tree-sitter-language-pack>=0.2",
-  "fastembed>=0.4",              # Q1: local ONNX embeddings, no network on first run
-  "platformdirs>=4.2",
-  "httpx>=0.27",
-]
+# 0.0.1 is a name placeholder with no functionality, so it ships no runtime
+# dependencies — installing it must not pull ~500MB of ONNX and tree-sitter
+# wheels for a stub. The planned M1 base install (ADR-0005: must work offline
+# with local embeddings) is:
+#
+#   pydantic>=2.7 · pyyaml>=6.0 · typer>=0.12 · rich>=13.7
+#   sqlite-vec>=0.1.6              (Q2: confirm recall at 1e6 vectors)
+#   tree-sitter>=0.23 · tree-sitter-language-pack>=0.2
+#   fastembed>=0.4                 (Q1: local ONNX, no network on first run)
+#   platformdirs>=4.2 · httpx>=0.27
+dependencies = []
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2"]
@@ -57,7 +55,7 @@ dev = [
 ]
 
 [project.scripts]
-mog = "mog.cli.main:app"
+mog = "mog.cli.main:app"          # placeholder in 0.0.1; real surface in SPEC-cli.md
 
 [project.urls]
 Homepage = "https://github.com/prayag2301/Mogestrator"
