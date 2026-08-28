@@ -1,2 +1,4 @@
-# Python dependencies for Orchestration
-# Add package pins here as modules are implemented.
+# Runtime dependencies are declared in pyproject.toml (ADR-0002).
+# This file exists only for `pip install -r requirements.txt` convenience during
+# development and mirrors the [dev] extra.
+-e .[dev]
