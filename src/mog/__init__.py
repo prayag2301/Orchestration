@@ -1,9 +1,11 @@
 """Mogestrator — a context substrate and policy gateway for coding agents.
 
-This release is a name placeholder. The project is in its planning phase (M0);
-no functionality is implemented yet. See the design docs:
-https://github.com/prayag2301/Orchestration/tree/main/docs
+M1 (in progress): builds and maintains an anchored graph of a codebase, and
+detects when remembered facts have drifted from the code they describe.
+Retrieval (`search`, `impact`, `why`) lands in M2.
+
+Design docs: https://github.com/prayag2301/Orchestration/tree/main/docs
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0.dev0"
 __all__ = ["__version__"]

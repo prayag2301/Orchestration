@@ -12,15 +12,22 @@ Sequencing, not dates. Every milestone ends in a demo a stranger can reproduce.
 | **M5** | Policy plane | Gateway blocks scripted exfiltration; audit names the rule |
 | **M6** | Distribution | `uvx mogestrator` green on macOS/Linux/Windows |
 
-## M1 — Graph and index
-- [ ] SQLite schema + migrations; `sqlite-vec` and FTS5 wired (resolve **Q2**)
-- [ ] tree-sitter parsers: Python, TypeScript, Go, Rust
-- [ ] Node/edge extraction: `defines`, `calls`, `imports`, `tested_by`
-- [ ] Anchors: normalized span hashing, drift detection, rename continuity
+## M1 — Graph and index  *(in progress)*
+- [x] SQLite schema + migrations; FTS5 wired; `sqlite-vec` probed with graceful
+      degradation when extensions cannot load (**Q2 resolved**, ADR-0007)
+- [x] tree-sitter parsers: Python, TypeScript, Go, Rust — spec-driven, so a new
+      language is a `LangSpec`, not a module
+- [x] Node/edge extraction: `defines`, `calls`, `tested_by`; call fan-out capped
+      (dropping 98.3% ambiguous edges measured on Django)
+- [x] Anchors: normalized span hashing, drift detection, automatic staleness
+- [x] `mog init/index/status/verify/show/map`
+- [x] Perf measured on a 525k-LOC repo; results in ARCHITECTURE §6
+- [x] 48 tests covering anchors, store, parsers, indexing and the CLI contract
+- [ ] `imports` edges (parsed and stored on the file node, not yet linked)
 - [ ] Git miner for `co_changed`
-- [ ] Local embedder + content-hash cache (resolve **Q1**)
-- [ ] `mog init/index/status/verify/show/map`
-- [ ] Perf harness for the ARCHITECTURE §6 targets
+- [ ] Local embedder + content-hash cache (**Q1** still open)
+- [ ] Rename continuity via body-hash matching
+- [ ] Close the index-size gap (ADR-0007)
 
 ## M2 — Retrieval
 - [ ] k-NN seeding + FTS5 exact fallback

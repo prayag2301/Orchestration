@@ -1,0 +1,275 @@
+"""Builds the graph from a working tree (SPEC-context-graph §8).
+
+Incremental by default: a file whose content hash is unchanged is skipped
+entirely, so re-indexing after a commit touches only what moved.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from tree_sitter_language_pack import get_parser
+
+from mog.graph.anchors import file_hash, span_hash
+from mog.graph.models import Anchor, Edge, EdgeKind, Node, NodeKind, State
+from mog.graph.store import Store
+from mog.index.parsers.base import LangSpec, Symbol, extract, spec_for_path
+from mog.index.walker import DEFAULT_EXCLUDES, discover
+
+#: A callee name resolving to more than this many definitions carries almost no
+#: information — `__init__`, `get`, `save` match hundreds of unrelated symbols,
+#: and linking them all produces a hairball that buries real structure (the same
+#: reasoning as IDF: a term in every document discriminates nothing). Measured
+#: on Django: this cap removes 98.3% of call edges, all of them ambiguous.
+MAX_CALL_FANOUT = 8
+
+#: Resolves Q5: we store an L1 preview (signature + docstring) and byte offsets,
+#: not whole bodies. The working tree is the source of truth for code; the anchor
+#: already tells us whether it has moved. Storing bodies made the Django index
+#: 25% of source size — mostly a second copy of Django.
+PREVIEW_CHARS = 600
+
+
+@dataclass(slots=True)
+class IndexStats:
+    files_seen: int = 0
+    files_indexed: int = 0
+    files_skipped: int = 0
+    files_removed: int = 0
+    symbols: int = 0
+    edges: int = 0
+    stale_marked: int = 0
+    languages: dict[str, int] = field(default_factory=dict)
+    duration: float = 0.0
+
+    def summary(self) -> str:
+        return (
+            f"{self.files_indexed} indexed, {self.files_skipped} unchanged, "
+            f"{self.files_removed} removed · {self.symbols} symbols · {self.edges} edges"
+        )
+
+
+class Indexer:
+    def __init__(self, root: Path, store: Store, *, exclude=DEFAULT_EXCLUDES) -> None:
+        self.root = Path(root).resolve()
+        self.store = store
+        self.exclude = exclude
+        self._parsers: dict[str, object] = {}
+
+    def _parser(self, lang: str):
+        if lang not in self._parsers:
+            self._parsers[lang] = get_parser(lang)
+        return self._parsers[lang]
+
+    def run(self, *, full: bool = False) -> IndexStats:
+        started = time.time()
+        stats = IndexStats()
+        known = {} if full else self.store.known_files()
+        seen: set[str] = set()
+        # (qualname, path) -> node id, for cross-file call resolution.
+        symbol_index: dict[str, list[str]] = {}
+        pending_calls: list[tuple[str, str]] = []
+        pending_tests: list[tuple[str, str]] = []
+
+        with self.store.transaction():
+            if full:
+                for path in list(self.store.known_files()):
+                    self.store.forget_file(path)
+
+            for rel, abs_path, size in discover(self.root, exclude=self.exclude):
+                stats.files_seen += 1
+                seen.add(rel)
+                try:
+                    source = abs_path.read_bytes()
+                except OSError:
+                    continue
+                fhash = file_hash(source)
+                if known.get(rel) == fhash:
+                    stats.files_skipped += 1
+                    self._reindex_names(rel, symbol_index)
+                    continue
+
+                self.store.delete_file_nodes(rel)
+                spec = spec_for_path(rel)
+                lang = spec.name if spec else None
+                nodes, edges, syms = self._index_file(rel, source, spec, fhash)
+                self.store.upsert_nodes(nodes)
+                self.store.upsert_edges(edges)
+                self.store.record_file(rel, fhash, lang, size, time.time())
+
+                stats.files_indexed += 1
+                stats.symbols += len(syms)
+                stats.edges += len(edges)
+                if lang:
+                    stats.languages[lang] = stats.languages.get(lang, 0) + 1
+
+                for node, sym in syms:
+                    symbol_index.setdefault(sym.name, []).append(node.id)
+                    symbol_index.setdefault(sym.qualname, []).append(node.id)
+                    for callee in sym.calls:
+                        pending_calls.append((node.id, callee))
+                    if sym.is_test:
+                        pending_tests.append((node.id, sym.name))
+
+            for path in set(known) - seen:
+                self.store.forget_file(path)
+                stats.files_removed += 1
+
+            resolved = self._resolve_calls(pending_calls, symbol_index)
+            resolved += self._link_tests(pending_tests, symbol_index)
+            stats.edges += resolved
+            stats.stale_marked = self._mark_stale_facts()
+            self.store.set_meta("last_indexed_at", time.time())
+            self.store.set_meta("root", str(self.root))
+
+        stats.duration = time.time() - started
+        return stats
+
+    def _reindex_names(self, rel: str, symbol_index: dict[str, list[str]]) -> None:
+        """Unchanged files still need their symbols visible to call resolution."""
+        for node in self.store.find_nodes(path=rel, limit=10_000):
+            if node.kind in (NodeKind.SYMBOL, NodeKind.TEST):
+                symbol_index.setdefault(node.name, []).append(node.id)
+                if node.anchor and node.anchor.symbol:
+                    symbol_index.setdefault(node.anchor.symbol, []).append(node.id)
+
+    def _index_file(
+        self, rel: str, source: bytes, spec: LangSpec | None, fhash: str
+    ) -> tuple[list[Node], list[Edge], list[tuple[Node, Symbol]]]:
+        text = source.decode("utf-8", "replace")
+        file_node = Node(
+            kind=NodeKind.FILE,
+            name=rel.rsplit("/", 1)[-1],
+            content=text[:PREVIEW_CHARS],
+            meta={"lines": text.count("\n") + 1},
+            anchor=Anchor(path=rel, span_hash=fhash, file_hash=fhash),
+        )
+        nodes: list[Node] = [file_node]
+        edges: list[Edge] = []
+        syms: list[tuple[Node, Symbol]] = []
+
+        if spec is None:
+            return nodes, edges, syms  # degraded: file-level node + FTS only
+
+        try:
+            tree = self._parser(spec.name).parse(source)
+        except Exception:
+            return nodes, edges, syms
+
+        symbols, imports = extract(tree.root_node, source, spec, rel)
+        for sym in symbols:
+            start, end = sym.node.start_byte, sym.node.end_byte
+            body = source[start:end].decode("utf-8", "replace")
+            node = Node(
+                kind=NodeKind.TEST if sym.is_test else NodeKind.SYMBOL,
+                name=sym.name,
+                content=body[:PREVIEW_CHARS],
+                anchor=Anchor(
+                    path=rel,
+                    symbol=sym.qualname,
+                    span_hash=span_hash(sym.node, source),
+                    start_line=sym.node.start_point[0] + 1,
+                ),
+                meta={
+                    "symbol_kind": sym.kind,
+                    "qualname": sym.qualname,
+                    "end_line": sym.node.end_point[0] + 1,
+                    "signature": body.split("\n", 1)[0][:200],
+                    # Byte offsets let L2 read the exact body from disk without
+                    # a second copy in the database.
+                    "start_byte": start,
+                    "end_byte": end,
+                },
+            )
+            nodes.append(node)
+            edges.append(Edge(file_node.id, node.id, EdgeKind.DEFINES))
+            syms.append((node, sym))
+
+        for imp in imports:
+            file_node.meta.setdefault("imports", []).append(imp)
+        return nodes, edges, syms
+
+    def _resolve_calls(self, pending: list[tuple[str, str]], index: dict[str, list[str]]) -> int:
+        """Link call sites to definitions by name.
+
+        Ambiguity is recorded rather than hidden: when a name resolves to
+        several definitions we link all of them and mark the edge ambiguous, so
+        retrieval can down-weight it instead of trusting a coin flip.
+        """
+        edges: list[Edge] = []
+        self.dropped_ambiguous = 0
+        for caller_id, callee in pending:
+            targets = index.get(callee)
+            if not targets:
+                continue
+            if len(targets) > MAX_CALL_FANOUT:
+                # Too common to be informative. Dropped rather than down-weighted:
+                # a low weight still costs a row and still pollutes expansion.
+                self.dropped_ambiguous += 1
+                continue
+            ambiguous = len(targets) > 1
+            for target in dict.fromkeys(targets):
+                if target == caller_id:
+                    continue
+                edges.append(
+                    Edge(
+                        caller_id, target, EdgeKind.CALLS,
+                        weight=0.4 if ambiguous else None,
+                        meta={"ambiguous": ambiguous, "name": callee},
+                    )
+                )
+        return self.store.upsert_edges(edges)
+
+    def _link_tests(self, tests: list[tuple[str, str]], index: dict[str, list[str]]) -> int:
+        """``test_verify_token`` -> ``verify_token``, when that symbol exists."""
+        edges: list[Edge] = []
+        for test_id, test_name in tests:
+            stem = test_name
+            for prefix in ("test_", "Test", "test"):
+                if stem.startswith(prefix):
+                    stem = stem[len(prefix) :]
+                    break
+            for candidate in {stem, stem.lstrip("_")}:
+                if not candidate:
+                    continue
+                targets = index.get(candidate, [])
+                if len(targets) > MAX_CALL_FANOUT:
+                    continue
+                for target in dict.fromkeys(targets):
+                    if target != test_id:
+                        edges.append(Edge(target, test_id, EdgeKind.TESTED_BY))
+        return self.store.upsert_edges(edges)
+
+    def _mark_stale_facts(self) -> int:
+        """Flip episodic facts whose anchored span no longer matches.
+
+        This is the whole point of anchoring: memory that can be wrong and
+        knows it (ADR-0003). Stale facts are labelled, never deleted.
+        """
+        current: dict[tuple[str, str], str] = {}
+        for row in self.store.db.execute(
+            "SELECT path, anchor, span_hash FROM nodes "
+            "WHERE kind IN ('symbol','test') AND anchor IS NOT NULL"
+        ):
+            import json as _json
+
+            anchor = _json.loads(row["anchor"])
+            if anchor.get("symbol"):
+                current[(row["path"], anchor["symbol"])] = row["span_hash"]
+
+        stale: list[str] = []
+        for row in self.store.db.execute(
+            "SELECT id, anchor, state FROM nodes WHERE anchor IS NOT NULL "
+            "AND kind NOT IN ('symbol','test','file','module') AND state='fresh'"
+        ):
+            import json as _json
+
+            anchor = _json.loads(row["anchor"])
+            key = (anchor.get("path"), anchor.get("symbol"))
+            if not key[1]:
+                continue
+            if current.get(key) != anchor.get("span_hash"):
+                stale.append(row["id"])
+        return self.store.set_state(stale, State.STALE)

@@ -20,4 +20,6 @@ dist/
 
 # OS / editors
 .DS_Store
-api_token
+
+# mogestrator dev
+.venv/

@@ -211,10 +211,10 @@ Checklists in [ROADMAP.md](./ROADMAP.md). Success criteria in
 | ID | Question | Blocks |
 |----|----------|--------|
 | Q1 | Default local embedding model — size vs. quality vs. cold-start download. Leaning a small ONNX bi-encoder (~90MB) with an opt-in stronger model. | M1 |
-| Q2 | `sqlite-vec` vs. a separate index (LanceDB/FAISS). Leaning `sqlite-vec` for the single-file property; must confirm recall at 10⁶ vectors. | M1 |
+| ~~Q2~~ | **Resolved (ADR-0007):** `sqlite-vec` v0.1.9 loads and gives exact recall; 50k×384-dim k-NN in 4.3 ms, scaling linearly (~86 ms projected at 10⁶). Caveat: macOS *system* Python cannot load SQLite extensions, so a degraded FTS-only mode is required and implemented. | ~~M1~~ |
 | Q3 | Does the episodic ledger auto-capture from the Claude Code transcript (via hooks) or require explicit `remember` calls? Auto-capture is far more valuable and far more invasive. | M4 |
 | Q4 | Is the gateway a proxy the agent is configured to use, or a library the host embeds? Proxy is stronger (it cannot be bypassed) and harder to deploy. | M5 |
-| Q5 | Do we store code content, or only hashes plus offsets into the working tree? Storing content survives checkouts but doubles the security surface. | M1 |
+| ~~Q5~~ | **Resolved (ADR-0007):** store an L1 preview (600 chars) plus byte offsets; read full bodies from the working tree at L2. Storing whole bodies duplicated the repo for little gain. | ~~M1~~ |
 
 ## 9. Risks
 
