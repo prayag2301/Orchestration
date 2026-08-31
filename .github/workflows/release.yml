@@ -36,6 +36,9 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: build
+    # Only a published release publishes. workflow_dispatch exercises the build
+    # and metadata check without touching PyPI.
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi           # must match the Environment name in the PyPI publisher config
     permissions:
