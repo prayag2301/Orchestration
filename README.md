@@ -5,19 +5,35 @@
 Claude Code already orchestrates well — subagents, hooks, skills, MCP, plan mode.
 What it doesn't have is memory that can be *checked*. Mogestrator keeps a live,
 anchored, self-invalidating graph of your codebase and of what agents have
-learned about it, serves precisely-scoped context on demand, and enforces prompt
-integrity and network policy on every tool-using agent.
+learned about it — memory that knows when it has gone out of date. The design
+extends to serving precisely-scoped context on demand and enforcing prompt
+integrity and network policy on tool-using agents; see the status note below for
+what is built versus specified.
 
 ```bash
-uvx mogestrator index          # nothing to install
-mog serve --mcp                # Claude Code now has a memory that knows when it's wrong
+git clone https://github.com/prayag2301/Orchestration.git && cd Orchestration
+uv venv && uv pip install -e .
+
+mog index      # build the graph
+mog verify     # re-check every anchor: how much of what it knows is now wrong?
 ```
 
-> **Status: planning (M0).** The design is complete and documented; no code is
-> written. Nothing below is installable today. Every performance and quality
-> claim here is a **design target**, not a measurement — see
-> [EVALUATION.md](docs/EVALUATION.md) for how each one gets validated, and
-> [ROADMAP.md](docs/ROADMAP.md) for progress.
+> **Status: M1 of 6 — the index works, retrieval does not.**
+>
+> **Built and tested:** the context graph, content-hash anchors with automatic
+> staleness detection, incremental indexing for Python/TypeScript/Go/Rust, and
+> the `init · index · status · verify · show · map` commands. 48 tests.
+> Measured on a 525k-LOC repo: **11.2s** full index, **1.5s** incremental.
+>
+> **Not built:** everything downstream — retrieval (`search`, `impact`, `why`),
+> embeddings, the working set, the MCP server, and the entire policy plane.
+> Those sections below describe the design, not shipped behaviour, and are
+> marked *(planned)*.
+>
+> Claims about *quality* — that this beats ripgrep or chunk-RAG — remain
+> untested hypotheses; the harness that decides them is specified in
+> [EVALUATION.md](docs/EVALUATION.md) and gates M2. Progress:
+> [ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
@@ -178,8 +194,27 @@ Full threat model (T1–T6) and specification: [SPEC-policy.md](docs/SPEC-policy
 
 ## Installation
 
+### Today: from source
+
+```bash
+git clone https://github.com/prayag2301/Orchestration.git && cd Orchestration
+uv venv && source .venv/bin/activate
+uv pip install -e .
+mog --version
+```
+
+Requires Python 3.11+. `pip install mogestrator` currently gets **0.0.1, a name
+placeholder that does nothing** — the working code is not released yet.
+
+> On macOS, the *system* Python (`/usr/bin/python3`) is built without SQLite
+> extension support, so `sqlite-vec` cannot load there. `mog` detects this and
+> falls back to full-text search; `mog status` tells you which mode you are in.
+> Use a uv/homebrew/python.org interpreter to get vector support.
+
+### Planned: every other channel *(M6)*
+
 Full channel matrix and build/signing process: [DISTRIBUTION.md](docs/DISTRIBUTION.md).
-*None of these work yet — they ship in M6.*
+**None of the commands below work yet.**
 
 ```bash
 # zero install — recommended first contact
@@ -202,40 +237,54 @@ npx @mogestrator/cli index
 docker run --rm -v "$PWD:/w" -w /w ghcr.io/prayag2301/mogestrator index
 ```
 
-**In Claude Code** — the primary integration:
+**In Claude Code** — the primary integration, and the point of the whole project
+*(M3, not yet implemented)*:
 
 ```bash
 claude mcp add mog -- mog serve --mcp --watch
 ```
 
-Claude Code gains `search_context`, `expand`, `impact`, `why`, `remember`,
+Claude Code would gain `search_context`, `expand`, `impact`, `why`, `remember`,
 `recall`, `pin`, and `verify` as tools. Also planned: a plugin marketplace entry
 (`/mog-search`, `/mog-why`), `mise`, Nix, Scoop, and a VS Code extension.
 
 ## Usage
 
-```bash
-mog init                      # scaffold mogestrator.yaml, .mog/, .mogignore
-mog index --watch             # build the graph; incremental, stays live
-mog status                    # counts, index age, anchor drift rate
+### Working today
 
+```bash
+mog init                     # scaffold mogestrator.yaml, .mogignore, .mog/
+mog index [--full]           # build the graph; incremental by default
+mog status                   # counts, index age, drift, vector availability
+mog verify [--strict]        # re-check every anchor; --strict exits 4 on drift
+mog show Store.upsert_nodes  # one symbol: anchor, callers, callees, tests
+mog map                      # the files with the most symbols
+```
+
+Every command takes `--repo PATH`; `index`, `status` and `verify` take `--json`
+for scripting. Exit codes are a contract — see [SPEC-cli.md](docs/SPEC-cli.md).
+
+`mog verify` is the one worth trying first. It answers a question nothing else
+does: *how much of what the index believes is no longer true?*
+
+```console
+$ mog verify
+checked 93 anchors · 93 hold · 0 drifted (0.0% drift rate)
+```
+
+### Planned *(M2–M5, not implemented)*
+
+```bash
 mog search "where are refresh tokens validated" --explain --budget 2000
 mog impact verify_token --tests          # what breaks, and which tests cover it
 mog why "why not RS256"                  # decisions, failures, constraints
-mog map                                  # L0 repo map
-
-mog remember failure "RS256 rejected: key rotation needs infra we don't have" \
-    --anchor src/auth/config.py::load_keys
-mog recall ctx_8f2a          # restore an evicted item verbatim
-mog pin n_9f3c
-
-mog verify --fix             # re-check every anchor, report drift
-mog ws show                  # working set, scores, budget usage
+mog remember failure "RS256 rejected: key rotation needs infra we lack"
+mog recall ctx_8f2a                      # restore an evicted item verbatim
+mog ws show                              # working set, scores, budget usage
 
 mog serve --mcp --watch                  # expose to Claude Code / any MCP client
 mog gateway --policy policy/ --port 8080 # policy plane for server-based chats
 mog policy explain api.github.com        # which rule allows this, and why
-mog audit --egress --since 24h
 ```
 
 Full command reference: [SPEC-cli.md](docs/SPEC-cli.md).
@@ -250,8 +299,29 @@ humans — the consumer is an agent.
 
 ## Does it actually work?
 
-Unknown, and we refuse to pretend otherwise. Every claim above is a hypothesis
-until [EVALUATION.md](docs/EVALUATION.md) says otherwise. The harness measures
+**Speed: measured.** On django/django (4,989 files, 44.6 MB of source, ~525k LOC),
+Apple Silicon laptop:
+
+| | Target | Measured | |
+|---|---|---|---|
+| Full index | < 60s for 50k LOC | **11.2s for 525k LOC** | ✅ |
+| Incremental re-index | < 2s | **1.5s** | ✅ |
+| Index size | < 15% of source | **145 MB vs 44.6 MB — 325%** | ❌ |
+
+The size target is missed by more than an order of magnitude. It was a planning
+guess with no analysis behind it, and roughly 1 KB per symbol is unavoidable once
+you store an anchor, a preview, and a full-text entry. Documented with the
+breakdown and the options in [ADR-0007](docs/adr/0007-index-scale-findings.md)
+rather than quietly re-baselined.
+
+Measuring on a real repo instead of fixtures also caught a design flaw:
+naive call resolution produced **1,991,411 edges, 98.3% of them ambiguous**
+(`__init__` alone: 534,473). Capping fan-out cut the index 4× in both time and
+size.
+
+**Quality: unknown, and we refuse to pretend otherwise.** Every claim that this
+beats the alternatives is a hypothesis until
+[EVALUATION.md](docs/EVALUATION.md) says otherwise. The harness measures
 against four baselines — `rg` + full file reads (**B0**), chunk RAG (**B1**),
 no management (**B2**), and summarization compaction (**B3**) — on localization,
 impact, multi-session continuity, repeat-failure avoidance, staleness handling,
@@ -281,11 +351,13 @@ results go in `docs/results/` too.
 
 ## Requirements
 
-Python 3.11+ (pip/uv/pipx channels only — binary, Homebrew, npm, and Docker
-bundle their own runtime) · Git · a tree-sitter-supported language for symbol-level
-indexing (Python, TypeScript, Go, Rust at M1; others degrade to file-level).
-No API key needed: embeddings run locally by default and your code never leaves
-the machine.
+Python 3.11+ · Git · a tree-sitter-supported language for symbol-level indexing
+(Python, TypeScript, Go, Rust; anything else degrades to file-level nodes plus
+full-text search — degraded, not broken).
+
+No API key, no account, no network. The graph is one SQLite file in `.mog/`, and
+your code never leaves the machine. Embeddings, when they land in M2, run locally
+by default (ADR-0005).
 
 ## Contributing
 
